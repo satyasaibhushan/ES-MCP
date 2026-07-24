@@ -31,6 +31,12 @@ class Executor(Protocol):
 class Registry(Protocol):
     def get(self, profile: Profile) -> Executor: ...
 
+    def check(self, profile: Profile) -> ElasticsearchResponse: ...
+
+    def tunnel_status(self, profile: Profile) -> dict[str, Any]: ...
+
+    def close(self) -> None: ...
+
 
 @dataclass(frozen=True)
 class PreparedRequest:
@@ -113,7 +119,69 @@ class ESMCPService:
             "allow_scripts": profile.limits.allow_scripts,
         }
         detail["tls_verification"] = profile.tls.verify
+        detail["tunnel"] = self.clients.tunnel_status(profile)
         return detail
+
+    def check_connection(self, name: str) -> dict[str, Any]:
+        profile = self.get_profile(name)
+        start = time.monotonic()
+        canonical = canonical_request(
+            method="GET", path="/", body=None, params={}
+        )
+        request_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        try:
+            response = self.clients.check(profile)
+        except Exception as exc:
+            self.audit.log(
+                profile=profile.name,
+                method="GET",
+                path="/",
+                operation="CONNECTION_CHECK",
+                tier="discovery",
+                targets=(),
+                request_hash=request_hash,
+                decision="execution_failed",
+                error=str(exc),
+                elapsed_ms=(time.monotonic() - start) * 1_000,
+            )
+            raise
+        body = response.body if isinstance(response.body, dict) else {}
+        version = body.get("version")
+        version_data = version if isinstance(version, dict) else {}
+        result = {
+            "profile": profile.name,
+            "reachable": True,
+            "ok": 200 <= response.status_code < 300,
+            "status_code": response.status_code,
+            "cluster_name": body.get("cluster_name"),
+            "version": version_data.get("number"),
+            "distribution": (
+                version_data.get("distribution")
+                or (
+                    "opensearch"
+                    if body.get("tagline") == "The OpenSearch Project: https://opensearch.org/"
+                    else "elasticsearch"
+                )
+            ),
+            "product": response.headers.get("x-elastic-product"),
+            "tunnel": self.clients.tunnel_status(profile),
+        }
+        self.audit.log(
+            profile=profile.name,
+            method="GET",
+            path="/",
+            operation="CONNECTION_CHECK",
+            tier="discovery",
+            targets=(),
+            request_hash=request_hash,
+            decision="executed",
+            status_code=response.status_code,
+            elapsed_ms=(time.monotonic() - start) * 1_000,
+        )
+        return result
+
+    def close(self) -> None:
+        self.clients.close()
 
     def _prepare(
         self,

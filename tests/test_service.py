@@ -33,6 +33,23 @@ class FakeRegistry:
     def get(self, profile: Profile) -> FakeExecutor:
         return self.executor
 
+    def check(self, profile: Profile) -> ElasticsearchResponse:
+        return ElasticsearchResponse(
+            200,
+            {
+                "cluster_name": "project-uat",
+                "version": {"number": "6.8.23"},
+                "tagline": "You Know, for Search",
+            },
+            {},
+        )
+
+    def tunnel_status(self, profile: Profile) -> dict[str, Any]:
+        return {"enabled": profile.ssh.enabled, "active": profile.ssh.enabled}
+
+    def close(self) -> None:
+        pass
+
 
 def _service(tmp_path: Path) -> tuple[ESMCPService, FakeExecutor]:
     profile = Profile(
@@ -120,3 +137,21 @@ def test_changed_approved_request_is_rejected_and_consumed(tmp_path):
         )
     assert executor.calls == []
 
+
+def test_connection_check_returns_sanitized_version(tmp_path):
+    service, executor = _service(tmp_path)
+
+    result = service.check_connection("project")
+
+    assert result == {
+        "profile": "project",
+        "reachable": True,
+        "ok": True,
+        "status_code": 200,
+        "cluster_name": "project-uat",
+        "version": "6.8.23",
+        "distribution": "elasticsearch",
+        "product": None,
+        "tunnel": {"enabled": False, "active": False},
+    }
+    assert executor.calls == []

@@ -11,6 +11,8 @@ from typing import Any
 import httpx
 
 from .profiles import Profile
+from .transport import TunnelHTTPTransport
+from .tunnel import TunnelError, TunnelManager
 
 
 class ElasticsearchError(RuntimeError):
@@ -41,7 +43,9 @@ class ElasticsearchClient:
             "User-Agent": "es-mcp/0.1.0",
         }
         auth: httpx.Auth | None = None
-        if kind == "api_key":
+        if kind == "none":
+            pass
+        elif kind == "api_key":
             headers["Authorization"] = f"ApiKey {credentials}"
         elif kind == "bearer":
             headers["Authorization"] = f"Bearer {credentials}"
@@ -56,13 +60,27 @@ class ElasticsearchClient:
                 raise ElasticsearchError("ca_cert cannot be used when TLS verification is off")
             verify = ssl.create_default_context(cafile=profile.tls.ca_cert)
 
+        self._tunnel = TunnelManager(profile) if profile.ssh.enabled else None
+        effective_transport = transport
+        if self._tunnel is not None and effective_transport is None:
+            if isinstance(verify, ssl.SSLContext):
+                ssl_context = verify
+            elif verify:
+                ssl_context = ssl.create_default_context()
+            else:
+                ssl_context = ssl._create_unverified_context()
+            effective_transport = TunnelHTTPTransport(
+                tunnel=self._tunnel,
+                ssl_context=ssl_context,
+            )
+
         self._client = httpx.Client(
             auth=auth,
             headers=headers,
             timeout=httpx.Timeout(profile.limits.timeout_seconds),
             verify=verify,
             follow_redirects=False,
-            transport=transport,
+            transport=effective_transport,
         )
 
     def execute(
@@ -108,6 +126,8 @@ class ElasticsearchClient:
                 )
         except ResponseTooLargeError:
             raise
+        except TunnelError as exc:
+            raise ElasticsearchError(str(exc)) from exc
         except httpx.TimeoutException as exc:
             raise ElasticsearchError("Elasticsearch request timed out") from exc
         except httpx.HTTPError as exc:
@@ -116,7 +136,16 @@ class ElasticsearchClient:
             ) from exc
 
     def close(self) -> None:
-        self._client.close()
+        try:
+            self._client.close()
+        finally:
+            if self._tunnel is not None:
+                self._tunnel.close()
+
+    def tunnel_status(self) -> dict[str, Any]:
+        if self._tunnel is None:
+            return {"enabled": False, "active": False}
+        return self._tunnel.status()
 
 
 class ClientRegistry:
@@ -132,10 +161,33 @@ class ClientRegistry:
                 self._clients[profile.name] = client
             return client
 
+    def check(self, profile: Profile) -> ElasticsearchResponse:
+        return self.get(profile).execute(
+            method="GET",
+            path="/",
+            body=None,
+            params={},
+        )
+
+    def tunnel_status(self, profile: Profile) -> dict[str, Any]:
+        with self._lock:
+            client = self._clients.get(profile.name)
+        if client is None:
+            return {
+                "enabled": profile.ssh.enabled,
+                "active": False,
+                "remote_host": (
+                    profile.ssh.remote_host if profile.ssh.enabled else None
+                ),
+                "remote_port": (
+                    profile.ssh.remote_port if profile.ssh.enabled else None
+                ),
+            }
+        return client.tunnel_status()
+
     def close(self) -> None:
         with self._lock:
             clients = list(self._clients.values())
             self._clients.clear()
         for client in clients:
             client.close()
-

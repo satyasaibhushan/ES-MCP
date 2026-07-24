@@ -63,3 +63,28 @@ def test_aborts_oversized_response():
             params={},
         )
 
+
+def test_no_auth_sends_no_authorization_header():
+    profile = Profile(
+        name="project",
+        url="https://127.0.0.1:9200",
+        auth=AuthConfig(none=True),
+        tls=TLSConfig(verify=False),
+        limits=RequestLimits(),
+        permissions=Permissions(read_indices=("project-*",)),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json={"ok": True})
+
+    client = ElasticsearchClient(profile, httpx.MockTransport(handler))
+
+    response = client.execute(
+        method="GET",
+        path="/project-logs/_search",
+        body=None,
+        params={},
+    )
+
+    assert response.status_code == 200

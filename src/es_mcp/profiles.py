@@ -20,6 +20,7 @@ class ProfileError(ValueError):
 
 @dataclass(frozen=True)
 class AuthConfig:
+    none: bool = False
     api_key: str | None = None
     api_key_env: str | None = None
     bearer_token: str | None = None
@@ -28,7 +29,20 @@ class AuthConfig:
     password: str | None = None
     password_env: str | None = None
 
-    def credentials(self) -> tuple[str, str | tuple[str, str]]:
+    def mode(self) -> str:
+        if self.none:
+            return "none"
+        if self.api_key is not None or self.api_key_env is not None:
+            return "api_key"
+        if self.bearer_token is not None or self.bearer_token_env is not None:
+            return "bearer"
+        if self.username is not None:
+            return "basic"
+        raise ProfileError("No authentication method is configured")
+
+    def credentials(self) -> tuple[str, str | tuple[str, str] | None]:
+        if self.none:
+            return ("none", None)
         if self.api_key is not None:
             return ("api_key", self.api_key)
         if self.api_key_env is not None:
@@ -53,6 +67,24 @@ class AuthConfig:
                 raise ProfileError("Basic authentication password is not configured")
             return ("basic", (self.username, password))
         raise ProfileError("No authentication method is configured")
+
+
+@dataclass(frozen=True)
+class SSHConfig:
+    enabled: bool = False
+    host: str | None = None
+    port: int = 22
+    user: str | None = None
+    key_path: str | None = None
+    key_passphrase_env: str | None = None
+    host_key: str | None = None
+    verify_host_key: bool = True
+    known_hosts_path: str = "~/.ssh/known_hosts"
+    local_host: str = "127.0.0.1"
+    local_port: int | None = None
+    remote_host: str | None = None
+    remote_port: int | None = None
+    keepalive_seconds: int = 30
 
 
 @dataclass(frozen=True)
@@ -91,11 +123,22 @@ class Profile:
     tls: TLSConfig
     limits: RequestLimits
     permissions: Permissions
+    ssh: SSHConfig = field(default_factory=SSHConfig)
 
     def capability_summary(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "url": self.url,
+            "auth_mode": self.auth.mode(),
+            "ssh": {
+                "enabled": self.ssh.enabled,
+                "host": self.ssh.host if self.ssh.enabled else None,
+                "remote_host": self.ssh.remote_host if self.ssh.enabled else None,
+                "remote_port": self.ssh.remote_port if self.ssh.enabled else None,
+                "dynamic_local_port": (
+                    self.ssh.local_port is None if self.ssh.enabled else None
+                ),
+            },
             "read_indices": list(self.permissions.read_indices),
             "write_indices": {
                 pattern: sorted(operations)
@@ -193,7 +236,22 @@ def _validate_pattern(pattern: Any, label: str) -> str:
 
 
 def _parse_auth(raw: dict[str, Any]) -> AuthConfig:
+    supported = {
+        "none",
+        "api_key",
+        "api_key_env",
+        "bearer_token",
+        "bearer_token_env",
+        "username",
+        "password",
+        "password_env",
+    }
+    unknown = sorted(set(raw) - supported)
+    if unknown:
+        raise ProfileError(f"Unknown auth field(s): {', '.join(unknown)}")
+    none = _parse_bool(raw.get("none", False), "auth.none")
     auth = AuthConfig(
+        none=none,
         api_key=raw.get("api_key"),
         api_key_env=raw.get("api_key_env"),
         bearer_token=raw.get("bearer_token"),
@@ -204,6 +262,7 @@ def _parse_auth(raw: dict[str, Any]) -> AuthConfig:
     )
     methods = sum(
         (
+            auth.none,
             auth.api_key is not None or auth.api_key_env is not None,
             auth.bearer_token is not None or auth.bearer_token_env is not None,
             auth.username is not None,
@@ -214,6 +273,93 @@ def _parse_auth(raw: dict[str, Any]) -> AuthConfig:
     if auth.username is not None and auth.password is None and auth.password_env is None:
         raise ProfileError("Basic authentication requires password or password_env")
     return auth
+
+
+def _optional_port(value: Any, label: str) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise ProfileError(f"{label} must be a valid TCP port")
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ProfileError(f"{label} must be a valid TCP port") from exc
+    if not 1 <= port <= 65_535:
+        raise ProfileError(f"{label} must be between 1 and 65535")
+    return port
+
+
+def _parse_ssh(raw_value: Any, url: str) -> SSHConfig:
+    if raw_value is None:
+        return SSHConfig()
+    raw = _require_mapping(raw_value, "ssh")
+    supported = {
+        "enabled",
+        "host",
+        "port",
+        "user",
+        "key_path",
+        "key_passphrase_env",
+        "host_key",
+        "verify_host_key",
+        "known_hosts_path",
+        "local_host",
+        "local_port",
+        "remote_host",
+        "remote_port",
+        "keepalive_seconds",
+    }
+    unknown = sorted(set(raw) - supported)
+    if unknown:
+        raise ProfileError(f"Unknown ssh field(s): {', '.join(unknown)}")
+    enabled = _parse_bool(raw.get("enabled", False), "ssh.enabled")
+    if not enabled:
+        return SSHConfig()
+
+    split = urlsplit(url)
+    host = raw.get("host")
+    user = raw.get("user")
+    if not isinstance(host, str) or not host.strip():
+        raise ProfileError("ssh.host is required when SSH is enabled")
+    if not isinstance(user, str) or not user.strip():
+        raise ProfileError("ssh.user is required when SSH is enabled")
+    local_host = raw.get("local_host", "127.0.0.1")
+    if local_host != "127.0.0.1":
+        raise ProfileError("ssh.local_host must be 127.0.0.1")
+    remote_host = raw.get("remote_host", split.hostname)
+    if not isinstance(remote_host, str) or not remote_host:
+        raise ProfileError("ssh.remote_host could not be determined")
+    if split.hostname != remote_host:
+        raise ProfileError("ssh.remote_host must match the profile URL hostname")
+
+    port = _optional_port(raw.get("port", 22), "ssh.port")
+    remote_default = split.port or (443 if split.scheme == "https" else 80)
+    remote_port = _optional_port(
+        raw.get("remote_port", remote_default), "ssh.remote_port"
+    )
+    if port is None or remote_port is None:
+        raise ProfileError("SSH and remote ports are required")
+    keepalive = _positive_int(
+        raw, "keepalive_seconds", 30, prefix="ssh"
+    )
+    return SSHConfig(
+        enabled=True,
+        host=host,
+        port=port,
+        user=user,
+        key_path=raw.get("key_path") or None,
+        key_passphrase_env=raw.get("key_passphrase_env") or None,
+        host_key=raw.get("host_key") or None,
+        verify_host_key=_parse_bool(
+            raw.get("verify_host_key", True), "ssh.verify_host_key"
+        ),
+        known_hosts_path=raw.get("known_hosts_path", "~/.ssh/known_hosts"),
+        local_host=local_host,
+        local_port=_optional_port(raw.get("local_port"), "ssh.local_port"),
+        remote_host=remote_host,
+        remote_port=remote_port,
+        keepalive_seconds=keepalive,
+    )
 
 
 def _parse_modes(raw: dict[str, Any]) -> dict[ActionTier, ActionMode]:
@@ -236,16 +382,18 @@ def _parse_modes(raw: dict[str, Any]) -> dict[ActionTier, ActionMode]:
     return modes
 
 
-def _positive_int(raw: dict[str, Any], name: str, default: int) -> int:
+def _positive_int(
+    raw: dict[str, Any], name: str, default: int, *, prefix: str = "limits"
+) -> int:
     value = raw.get(name, default)
     if isinstance(value, bool):
-        raise ProfileError(f"limits.{name} must be a positive integer")
+        raise ProfileError(f"{prefix}.{name} must be a positive integer")
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise ProfileError(f"limits.{name} must be a positive integer") from exc
+        raise ProfileError(f"{prefix}.{name} must be a positive integer") from exc
     if parsed <= 0:
-        raise ProfileError(f"limits.{name} must be a positive integer")
+        raise ProfileError(f"{prefix}.{name} must be a positive integer")
     return parsed
 
 
@@ -261,6 +409,15 @@ def _parse_profile(name: str, value: Any) -> Profile:
         raise ProfileError("Credentials, query strings, and fragments are not allowed in url")
 
     auth = _parse_auth(_require_mapping(raw.get("auth"), f"profile {name!r}.auth"))
+    ssh = _parse_ssh(raw.get("ssh"), url)
+    if auth.none and not ssh.enabled and split.hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }:
+        raise ProfileError(
+            "auth.none requires SSH tunnelling or a loopback URL"
+        )
     tls_raw = _require_mapping(raw.get("tls", {}), f"profile {name!r}.tls")
     tls = TLSConfig(
         verify=_parse_bool(tls_raw.get("verify", True), "tls.verify"),
@@ -346,6 +503,7 @@ def _parse_profile(name: str, value: Any) -> Profile:
         tls=tls,
         limits=limits,
         permissions=permissions,
+        ssh=ssh,
     )
 
 

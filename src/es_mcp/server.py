@@ -99,6 +99,25 @@ class ESMCPServer:
                     ),
                 ),
                 Tool(
+                    name="es_check_connection",
+                    description=(
+                        "Open the configured SSH tunnel if needed and perform a "
+                        "sanitized Elasticsearch reachability/version check."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {"profile": {"type": "string"}},
+                        "required": ["profile"],
+                        "additionalProperties": False,
+                    },
+                    annotations=ToolAnnotations(
+                        readOnlyHint=True,
+                        destructiveHint=False,
+                        idempotentHint=True,
+                        openWorldHint=True,
+                    ),
+                ),
+                Tool(
                     name="es_describe_profile",
                     description=(
                         "Describe one profile's index scopes, action modes, and limits. "
@@ -173,6 +192,13 @@ class ESMCPServer:
                     return _text(
                         self.service.describe_profile(arguments["profile"])
                     )
+                if name == "es_check_connection":
+                    return _text(
+                        await asyncio.to_thread(
+                            self.service.check_connection,
+                            arguments["profile"],
+                        )
+                    )
                 if name == "es_request":
                     result = await asyncio.to_thread(
                         self.service.execute_allowed,
@@ -217,12 +243,15 @@ class ESMCPServer:
                 return _error(f"Unexpected server error ({type(exc).__name__})")
 
     async def run(self) -> None:
-        async with stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                self.server.create_initialization_options(),
-            )
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    self.server.create_initialization_options(),
+                )
+        finally:
+            self.service.close()
 
 
 def _load_env_file(path: Path) -> None:
@@ -246,6 +275,11 @@ def _argument_parser() -> argparse.ArgumentParser:
         "--profiles",
         type=Path,
         help="Path to profiles YAML (default: ES_MCP_PROFILES or ~/.es-access/profiles.yaml)",
+    )
+    parser.add_argument(
+        "--check-connections",
+        action="store_true",
+        help="Open configured tunnels, check every endpoint, print results, and exit.",
     )
     parser.add_argument(
         "--check-config",
@@ -277,6 +311,28 @@ def main() -> None:
         approvals=ApprovalStore(ttl_seconds=300),
         audit=AuditLogger(default_audit_dir()),
     )
+    if arguments.check_connections:
+        results: list[dict[str, Any]] = []
+        failed = False
+        try:
+            for name in profiles:
+                try:
+                    result = service.check_connection(name)
+                except Exception as exc:
+                    result = {
+                        "profile": name,
+                        "reachable": False,
+                        "ok": False,
+                        "error": str(exc),
+                    }
+                results.append(result)
+                failed = failed or not result["ok"]
+        finally:
+            service.close()
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+        if failed:
+            raise SystemExit(1)
+        return
     asyncio.run(ESMCPServer(service).run())
 
 

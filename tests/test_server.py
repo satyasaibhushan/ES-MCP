@@ -26,6 +26,22 @@ class FakeRegistry:
     def get(self, profile):
         return FakeExecutor()
 
+    def tunnel_status(self, profile):
+        return {"enabled": False, "active": False}
+
+    def check(self, profile):
+        return ElasticsearchResponse(
+            200,
+            {
+                "cluster_name": "test",
+                "version": {"number": "8.0.0"},
+            },
+            {"x-elastic-product": "Elasticsearch"},
+        )
+
+    def close(self):
+        pass
+
 
 async def test_mcp_protocol_lists_and_calls_tools(tmp_path):
     profile = Profile(
@@ -58,6 +74,7 @@ async def test_mcp_protocol_lists_and_calls_tools(tmp_path):
         tools = await session.list_tools()
         assert {tool.name for tool in tools.tools} == {
             "es_list_profiles",
+            "es_check_connection",
             "es_describe_profile",
             "es_request",
             "es_plan_request",
@@ -76,4 +93,3 @@ async def test_mcp_protocol_lists_and_calls_tools(tmp_path):
     payload = json.loads(result.content[0].text)
     assert payload["status_code"] == 200
     assert payload["body"] == {"hits": {"hits": []}}
-
