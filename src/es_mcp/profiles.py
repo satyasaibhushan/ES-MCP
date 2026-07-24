@@ -21,6 +21,7 @@ class ProfileError(ValueError):
 @dataclass(frozen=True)
 class AuthConfig:
     none: bool = False
+    direct: bool = False
     api_key: str | None = None
     api_key_env: str | None = None
     bearer_token: str | None = None
@@ -238,6 +239,7 @@ def _validate_pattern(pattern: Any, label: str) -> str:
 def _parse_auth(raw: dict[str, Any]) -> AuthConfig:
     supported = {
         "none",
+        "direct",
         "api_key",
         "api_key_env",
         "bearer_token",
@@ -250,8 +252,12 @@ def _parse_auth(raw: dict[str, Any]) -> AuthConfig:
     if unknown:
         raise ProfileError(f"Unknown auth field(s): {', '.join(unknown)}")
     none = _parse_bool(raw.get("none", False), "auth.none")
+    direct = _parse_bool(raw.get("direct", False), "auth.direct")
+    if direct and not none:
+        raise ProfileError("auth.direct is only valid together with auth.none")
     auth = AuthConfig(
         none=none,
+        direct=direct,
         api_key=raw.get("api_key"),
         api_key_env=raw.get("api_key_env"),
         bearer_token=raw.get("bearer_token"),
@@ -410,19 +416,35 @@ def _parse_profile(name: str, value: Any) -> Profile:
 
     auth = _parse_auth(_require_mapping(raw.get("auth"), f"profile {name!r}.auth"))
     ssh = _parse_ssh(raw.get("ssh"), url)
-    if auth.none and not ssh.enabled and split.hostname not in {
-        "127.0.0.1",
-        "localhost",
-        "::1",
-    }:
+    if (
+        auth.none
+        and not ssh.enabled
+        and not auth.direct
+        and split.hostname
+        not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }
+    ):
         raise ProfileError(
-            "auth.none requires SSH tunnelling or a loopback URL"
+            "auth.none requires SSH tunnelling, a loopback URL, or auth.direct "
+            "for an intentionally internet-reachable endpoint"
         )
     tls_raw = _require_mapping(raw.get("tls", {}), f"profile {name!r}.tls")
     tls = TLSConfig(
         verify=_parse_bool(tls_raw.get("verify", True), "tls.verify"),
         ca_cert=tls_raw.get("ca_cert"),
     )
+    if auth.direct:
+        if ssh.enabled:
+            raise ProfileError(
+                "auth.direct and SSH tunnelling are mutually exclusive"
+            )
+        if split.scheme != "https":
+            raise ProfileError("auth.direct requires an HTTPS url")
+        if not tls.verify:
+            raise ProfileError("auth.direct requires tls.verify: true")
 
     limits_raw = _require_mapping(raw.get("limits", {}), f"profile {name!r}.limits")
     limits = RequestLimits(

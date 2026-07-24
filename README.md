@@ -223,8 +223,24 @@ auth:
   none: true
 ```
 
-No-auth is accepted only with managed SSH enabled or for a loopback URL. It
-never emits an `Authorization` header.
+No-auth is accepted only with managed SSH enabled, for a loopback URL, or
+with `direct: true`. It never emits an `Authorization` header.
+
+For an endpoint that is intentionally reachable without a tunnel — for
+example an AWS domain whose resource policy allowlists the caller's IP —
+declare that explicitly:
+
+```yaml
+auth:
+  none: true
+  direct: true
+```
+
+`direct` skips only the tunnel-or-loopback requirement. It demands an HTTPS
+URL, keeps certificate verification mandatory (`tls.verify: false` is
+rejected), and cannot be combined with managed SSH or any credentialed mode.
+The endpoint's own network policy is the perimeter in this mode; the profile
+permissions remain the per-index boundary.
 
 ## Managed SSH tunnels
 

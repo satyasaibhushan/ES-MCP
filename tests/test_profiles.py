@@ -135,6 +135,79 @@ project:
     assert load_profiles(loopback_path)["project"].auth.mode() == "none"
 
 
+def test_direct_no_auth_permits_remote_https(tmp_path):
+    path = tmp_path / "profiles.yaml"
+    path.write_text(
+        """
+project:
+  url: https://es.example.test
+  auth:
+    none: true
+    direct: true
+  permissions:
+    reads:
+      indices: ["project-*"]
+""",
+        encoding="utf-8",
+    )
+
+    profile = load_profiles(path)["project"]
+    assert profile.auth.mode() == "none"
+    assert profile.auth.direct is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        # direct without none is meaningless
+        (
+            (
+                "  auth:\n    none: true\n    direct: true\n",
+                "  auth:\n    direct: true\n    api_key_env: TEST_ES_API_KEY\n",
+            ),
+            "only valid together with auth.none",
+        ),
+        # plain HTTP to a remote host with no auth
+        (("https://es.example.test", "http://es.example.test"), "requires an HTTPS url"),
+        # disabling certificate verification
+        (
+            (
+                "  permissions:",
+                "  tls:\n    verify: false\n  permissions:",
+            ),
+            "requires tls.verify: true",
+        ),
+        # contradictory routing
+        (
+            (
+                "  permissions:",
+                "  ssh:\n    enabled: true\n    host: gw.example.test\n"
+                "    user: limited-user\n    remote_host: es.example.test\n"
+                "    remote_port: 443\n  permissions:",
+            ),
+            "mutually exclusive",
+        ),
+    ],
+)
+def test_direct_no_auth_rejects_unsafe_configs(tmp_path, mutation, match):
+    base = """
+project:
+  url: https://es.example.test
+  auth:
+    none: true
+    direct: true
+  permissions:
+    reads:
+      indices: ["project-*"]
+"""
+    old, new = mutation
+    path = tmp_path / "profiles.yaml"
+    path.write_text(base.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ProfileError, match=match):
+        load_profiles(path)
+
+
 def test_loads_ssh_profile_with_dynamic_local_port(tmp_path):
     path = tmp_path / "profiles.yaml"
     path.write_text(
