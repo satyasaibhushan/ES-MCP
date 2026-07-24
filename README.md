@@ -4,6 +4,7 @@ A configuration-controlled MCP server for Elasticsearch. It places deterministic
 policy enforcement between an MCP client and Elasticsearch:
 
 - Named profiles isolate projects and environments.
+- Profiles can own lazy, reusable SSH tunnels with dynamic local ports.
 - Both the HTTP method and endpoint are classified. `GET` and `POST` searches
   are reads; a `POST` update is a write.
 - Every index expression is checked against its profile before a request leaves
@@ -27,15 +28,22 @@ MCP tool
   -> project and index policy
   -> request limits
   -> optional exact-request approval
+  -> optional managed SSH tunnel
   -> bounded HTTP client
   -> Elasticsearch
 ```
 
-Use one least-privilege Elasticsearch API key per profile. The API key's native
-role should mirror the profile's index patterns. Application policy is a second
-layer, not a replacement for Elasticsearch authorization.
+Where possible, use one least-privilege Elasticsearch API key per profile. The
+API key's native role should mirror the profile's index patterns. Application
+policy is a second layer, not a replacement for Elasticsearch authorization.
 
 Do not use a cluster administrator or `superuser` credential.
+
+Private VPC domains may instead accept unsigned requests based on network
+position. These profiles must declare `auth: {none: true}` explicitly and
+should use the managed SSH tunnel. In that mode, the MCP policy is the primary
+per-index application boundary because the cluster does not receive a profile
+identity.
 
 ## Supported endpoints
 
@@ -93,6 +101,7 @@ Requirements:
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/) or another Python package installer
 - An Elasticsearch API key with a least-privilege role
+- SSH access when using private, tunnelled endpoints
 
 Install and run the tests:
 
@@ -114,6 +123,12 @@ Edit both files, then validate without connecting to Elasticsearch:
 
 ```bash
 uv run es-mcp --check-config
+```
+
+To open every configured tunnel and run a sanitized endpoint/version check:
+
+```bash
+uv run es-mcp --check-connections
 ```
 
 The default paths are:
@@ -152,6 +167,7 @@ The server exposes:
 
 - `es_list_profiles`
 - `es_describe_profile`
+- `es_check_connection`
 - `es_request`
 - `es_plan_request`
 - `es_execute_approved_request`
@@ -179,6 +195,77 @@ approves the displayed method, path, operation, targets, and request hash, pass
 the unchanged request and returned token to `es_execute_approved_request`.
 Tokens expire after five minutes and are consumed before execution, including
 when execution fails.
+
+## Authentication
+
+Configure exactly one authentication mode:
+
+```yaml
+auth:
+  api_key_env: PROJECT_ES_API_KEY
+```
+
+```yaml
+auth:
+  bearer_token_env: PROJECT_ES_BEARER_TOKEN
+```
+
+```yaml
+auth:
+  username: reader
+  password_env: PROJECT_ES_PASSWORD
+```
+
+For a network-position-authorized private endpoint:
+
+```yaml
+auth:
+  none: true
+```
+
+No-auth is accepted only with managed SSH enabled or for a loopback URL. It
+never emits an `Authorization` header.
+
+## Managed SSH tunnels
+
+Each SSH-enabled profile owns one tunnel:
+
+```yaml
+url: https://es-uat.example.test
+
+ssh:
+  enabled: true
+  host: ssh.example.test
+  port: 22
+  user: limited-user
+  key_path: ~/.ssh/id_rsa
+  key_passphrase_env: SSH_KEY_PASSPHRASE
+  known_hosts_path: ~/.ssh/known_hosts
+  verify_host_key: true
+  local_host: 127.0.0.1
+  local_port:
+  remote_host: es-uat.example.test
+  remote_port: 443
+  keepalive_seconds: 30
+```
+
+The tunnel starts on first use, chooses a dynamic loopback port when
+`local_port` is empty, stays alive across requests, restarts after failure, and
+closes with the MCP process.
+
+If the configured private key is encrypted and its passphrase environment
+variable is unset, ES-MCP falls back to keys already loaded in the SSH agent.
+This avoids copying an existing key passphrase into the ES-MCP secrets file.
+
+The profile URL remains the real remote URL. The HTTP transport connects its
+TCP socket to the tunnel while retaining the URL hostname for TLS SNI,
+certificate validation, and the HTTP `Host` header. This permits
+`tls.verify: true`; use `tls.ca_cert` for a private CA rather than disabling
+verification.
+
+SSH gateway host keys are checked against `~/.ssh/known_hosts` by default.
+`verify_host_key: false` exists for disposable local testing and should not be
+used for shared environments.
 
 ## Native Elasticsearch role
 
@@ -213,6 +300,10 @@ If projects share an index, index patterns are insufficient isolation. Prefer
 separate indices. Otherwise use Elasticsearch document- and field-level
 security where the deployment supports them.
 
+For unsigned VPC profiles, a native per-profile role is unavailable. Bind the
+tunnel only to loopback, keep the SSH gateway restricted, and treat local
+processes on the machine as part of the trust boundary.
+
 ## Configuration rules
 
 - Read permissions must contain at least one exact index or trailing-wildcard
@@ -221,10 +312,13 @@ security where the deployment supports them.
   remote cluster syntax, `?`, character classes, and non-trailing wildcards are
   rejected during configuration or request validation.
 - Secrets are never returned by profile discovery tools.
+- Missing authentication is rejected; anonymous access must be explicit.
 - URLs cannot contain embedded credentials.
 - TLS verification defaults to enabled. Turning it off should be limited to
   disposable local environments.
 - Redirects are not followed.
+- SSH remote host must match the profile URL host.
+- Managed tunnels bind only to `127.0.0.1`; dynamic ports are recommended.
 - Multi-get bodies cannot override `_index`.
 - Cross-index terms lookup is rejected.
 

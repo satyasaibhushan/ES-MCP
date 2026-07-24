@@ -42,3 +42,53 @@ profiles:
       max_response_bytes: 2097152
       allow_scripts: false
 
+  # Example for a private VPC endpoint reached through an SSH gateway. The
+  # request carries no Authorization header; network position provides access.
+  students_uat:
+    # Keep the real hostname here. The tunnel-aware transport routes the TCP
+    # socket locally while preserving this hostname for TLS/SNI and Host.
+    url: https://es-uat.example.test
+
+    auth:
+      none: true
+
+    ssh:
+      enabled: true
+      host: ssh.example.test
+      port: 22
+      user: limited-user
+      key_path: ~/.ssh/id_rsa
+      key_passphrase_env: SSH_KEY_PASSPHRASE
+      # Host keys are verified against this file by default.
+      known_hosts_path: ~/.ssh/known_hosts
+      verify_host_key: true
+      local_host: 127.0.0.1
+      # Empty means a collision-free dynamic port.
+      local_port:
+      remote_host: es-uat.example.test
+      remote_port: 443
+      keepalive_seconds: 30
+
+    tls:
+      verify: true
+
+    permissions:
+      reads:
+        indices:
+          - admin.students.v2*
+      actions:
+        discovery: allow
+        read: allow
+        expensive_read: approve
+        document_write: deny
+        structural_write: deny
+        admin: deny
+
+    limits:
+      timeout_seconds: 15
+      max_hits: 200
+      max_from: 1000
+      max_aggregation_size: 1000
+      max_request_bytes: 262144
+      max_response_bytes: 8388608
+      allow_scripts: false

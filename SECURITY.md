@@ -25,7 +25,12 @@ defense-in-depth:
 3. Approval tokens bind elevated operations to one exact request.
 4. Audit records support review without recording credentials or request bodies.
 
+For `auth.none` profiles, Elasticsearch receives no caller identity. The managed
+SSH tunnel and VPC security controls establish reachability, while the MCP
+policy becomes the primary per-index application restriction. Tunnels bind to a
+dynamic loopback port, but other local processes remain inside the trust
+boundary.
+
 Structural and administrative operations are outside the supported trust
 boundary. A configuration that requires those actions should use a separate,
 purpose-built administrative workflow.
-

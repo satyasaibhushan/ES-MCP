@@ -68,6 +68,29 @@ def _resolve_key_path(ssh: SSHConfig) -> str | None:
     return None
 
 
+def _load_private_key(
+    ssh: SSHConfig,
+) -> tuple[paramiko.PKey | None, bool]:
+    key_path = _resolve_key_path(ssh)
+    if key_path is None:
+        return None, True
+    passphrase = (
+        os.environ.get(ssh.key_passphrase_env)
+        if ssh.key_passphrase_env
+        else None
+    )
+    if ssh.key_passphrase_env and not passphrase:
+        return None, True
+    try:
+        return paramiko.PKey.from_path(key_path, passphrase=passphrase), False
+    except paramiko.PasswordRequiredException:
+        if passphrase:
+            raise TunnelError(f"Could not unlock SSH key: {key_path}") from None
+        return None, True
+    except (OSError, paramiko.SSHException) as exc:
+        raise TunnelError(f"Could not load SSH key: {key_path}") from exc
+
+
 def _parse_host_key(line: str) -> paramiko.PKey:
     entry = paramiko.hostkeys.HostKeyEntry.from_line(line.strip())
     if entry is None or entry.key is None:
@@ -129,6 +152,7 @@ class TunnelManager:
             kwargs: dict[str, Any] = {
                 "ssh_username": ssh.user,
                 "ssh_host_key": _load_known_host_key(ssh),
+                "ssh_config_file": None,
                 "remote_bind_address": (ssh.remote_host, ssh.remote_port),
                 "local_bind_address": (
                     ssh.local_host,
@@ -137,16 +161,10 @@ class TunnelManager:
                 "host_pkey_directories": [],
                 "set_keepalive": float(ssh.keepalive_seconds),
             }
-            key_path = _resolve_key_path(ssh)
-            if key_path:
-                kwargs["ssh_pkey"] = key_path
-                kwargs["allow_agent"] = False
-            else:
-                kwargs["allow_agent"] = True
-            if ssh.key_passphrase_env:
-                passphrase = os.environ.get(ssh.key_passphrase_env)
-                if passphrase:
-                    kwargs["ssh_private_key_password"] = passphrase
+            private_key, allow_agent = _load_private_key(ssh)
+            if private_key is not None:
+                kwargs["ssh_pkey"] = private_key
+            kwargs["allow_agent"] = allow_agent
             tunnel = SSHTunnelForwarder((ssh.host, ssh.port), **kwargs)
             try:
                 _start_with_legacy_rsa(tunnel)

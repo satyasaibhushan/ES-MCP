@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from . import __version__
 from .profiles import Profile
 from .transport import TunnelHTTPTransport
 from .tunnel import TunnelError, TunnelManager
@@ -40,7 +41,7 @@ class ElasticsearchClient:
         kind, credentials = profile.auth.credentials()
         headers = {
             "Accept": "application/json",
-            "User-Agent": "es-mcp/0.1.0",
+            "User-Agent": f"es-mcp/{__version__}",
         }
         auth: httpx.Auth | None = None
         if kind == "none":
@@ -68,7 +69,9 @@ class ElasticsearchClient:
             elif verify:
                 ssl_context = ssl.create_default_context()
             else:
-                ssl_context = ssl._create_unverified_context()
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
             effective_transport = TunnelHTTPTransport(
                 tunnel=self._tunnel,
                 ssl_context=ssl_context,
