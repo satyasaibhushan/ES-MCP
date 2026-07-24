@@ -17,12 +17,17 @@ _SCRIPT_KEYS = frozenset(
 )
 _SAFE_PARAMS = frozenset(
     {
+        "_source",
+        "_source_excludes",
+        "_source_includes",
         "allow_no_indices",
         "allow_partial_search_results",
         "expand_wildcards",
         "fields",
         "filter_path",
         "human",
+        "if_primary_term",
+        "if_seq_no",
         "ignore_unavailable",
         "include_unmapped",
         "local",
@@ -30,15 +35,46 @@ _SAFE_PARAMS = frozenset(
         "min_score",
         "preference",
         "pretty",
+        "realtime",
+        "refresh",
         "request_cache",
+        "require_alias",
+        "retry_on_conflict",
         "routing",
         "search_type",
+        "seq_no_primary_term",
+        "stored_fields",
         "terminate_after",
         "timeout",
         "track_total_hits",
+        "version",
+        "version_type",
+        "wait_for_active_shards",
+    }
+)
+_INDEX_EXPANSION_OPERATIONS = frozenset(
+    {
+        "COUNT",
+        "FIELD_CAPABILITIES",
+        "GET_MAPPING",
+        "RESOLVE_INDEX",
+        "SEARCH",
+        "VALIDATE_QUERY",
+    }
+)
+_EXACT_TARGET_OPERATIONS = frozenset(
+    {
+        "CREATE",
+        "DELETE",
+        "GET_DOCUMENT",
+        "GET_SOURCE",
+        "INDEX",
+        "MULTI_GET",
+        "UPDATE",
     }
 )
 _DURATION_RE = re.compile(r"^(?P<value>\d+)(?P<unit>ms|s|m|h|d)$")
+_INDEX_TARGET_RE = re.compile(r"^[a-z0-9._+-]+\*?$")
 _DURATION_MULTIPLIERS = {
     "ms": 0.001,
     "s": 1,
@@ -92,6 +128,8 @@ def _validate_target(target: str, profile: Profile) -> str | None:
         return "Only exact index names or a trailing '*' are supported"
     if "*" in target and (target.count("*") != 1 or not target.endswith("*")):
         return "Only exact index names or a trailing '*' are supported"
+    if not _INDEX_TARGET_RE.fullmatch(target):
+        return f"Index target {target!r} contains unsupported characters"
     if target.startswith(".") and not profile.permissions.allow_system_indices:
         return "System and hidden indices are not allowed"
     return None
@@ -159,13 +197,24 @@ def _duration_seconds(value: Any, label: str) -> tuple[float | None, str | None]
 
 
 def _check_params(profile: Profile, params: dict[str, Any]) -> str | None:
+    for name, value in params.items():
+        if not isinstance(name, str):
+            return "Query parameter names must be strings"
+        values = value if isinstance(value, list) else [value]
+        if any(
+            item is not None
+            and not isinstance(item, (str, int, float, bool))
+            for item in values
+        ):
+            return f"Query parameter {name!r} must contain scalar values"
     unknown = sorted(set(params) - _SAFE_PARAMS)
     if unknown:
         return f"Unsupported query parameter(s): {', '.join(unknown)}"
-    expand = str(params.get("expand_wildcards", "open")).lower()
-    values = {part.strip() for part in expand.split(",")}
-    if values - {"open"}:
-        return "expand_wildcards may only target open, non-hidden indices"
+    if "expand_wildcards" in params:
+        expand = str(params["expand_wildcards"]).lower()
+        values = {part.strip() for part in expand.split(",")}
+        if values - {"open"}:
+            return "expand_wildcards may only target open, non-hidden indices"
     if "scroll" in params:
         return "Scroll requests are not supported"
     for name in ("timeout", "master_timeout"):
@@ -210,7 +259,11 @@ def _prepare_body(profile: Profile, classified: ClassifiedRequest, body: Any) ->
             if size is not None and size > profile.limits.max_hits:
                 return Deny(f"size exceeds max_hits {profile.limits.max_hits}")
         else:
-            copied["size"] = min(10, profile.limits.max_hits)
+            copied["size"] = (
+                0
+                if "aggs" in copied or "aggregations" in copied
+                else min(10, profile.limits.max_hits)
+            )
         if "from" in copied:
             offset, error = _int_at_least_zero(copied["from"], "from")
             if error:
@@ -259,6 +312,8 @@ def check_request(
         error = _validate_target(target, profile)
         if error:
             return Deny(error)
+        if classified.operation in _EXACT_TARGET_OPERATIONS and "*" in target:
+            return Deny(f"{classified.operation} requires an exact index target")
 
     if classified.tier <= ActionTier.EXPENSIVE_READ:
         for target in targets:
@@ -286,7 +341,8 @@ def check_request(
     params_error = _check_params(profile, request_params)
     if params_error:
         return Deny(params_error)
-    request_params.setdefault("expand_wildcards", "open")
+    if classified.operation in _INDEX_EXPANSION_OPERATIONS:
+        request_params.setdefault("expand_wildcards", "open")
 
     body_decision = _prepare_body(profile, classified, body)
     if isinstance(body_decision, Deny):

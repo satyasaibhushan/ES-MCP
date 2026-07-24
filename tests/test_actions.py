@@ -22,6 +22,16 @@ def test_expensive_body_changes_search_tier():
     assert request.tier == ActionTier.EXPENSIVE_READ
 
 
+def test_exact_total_hits_parameter_is_expensive():
+    request = classify_request(
+        "GET",
+        "/project-logs-*/_search",
+        params={"track_total_hits": "true"},
+    )
+
+    assert request.tier == ActionTier.EXPENSIVE_READ
+
+
 def test_document_write_is_classified_by_route_and_method():
     request = classify_request(
         "POST", "/project-events/_update/123", {"doc": {"status": "done"}}
@@ -45,4 +55,3 @@ def test_delete_by_query_is_structural():
 
     assert request.tier == ActionTier.STRUCTURAL_WRITE
     assert request.supported is False
-

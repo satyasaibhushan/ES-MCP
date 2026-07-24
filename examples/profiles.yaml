@@ -1,0 +1,44 @@
+# Secrets can be provided through the environment or a sibling secrets.env file.
+# Index scopes only support exact names and namespace-style trailing wildcards.
+
+profiles:
+  payments_uat:
+    url: ${PAYMENTS_UAT_ES_URL}
+
+    auth:
+      # The variable contains the encoded Elasticsearch API key.
+      api_key_env: PAYMENTS_UAT_ES_API_KEY
+
+    tls:
+      verify: true
+      # ca_cert: ${PAYMENTS_UAT_ES_CA_CERT}
+
+    permissions:
+      reads:
+        indices:
+          - payments-logs-*
+          - payments-metrics-*
+          - payments-events
+
+      writes:
+        allowed:
+          payments-events:
+            - UPDATE
+
+      actions:
+        discovery: allow
+        read: allow
+        expensive_read: approve
+        document_write: approve
+        structural_write: deny
+        admin: deny
+
+    limits:
+      timeout_seconds: 10
+      max_hits: 200
+      max_from: 1000
+      max_aggregation_size: 1000
+      max_request_bytes: 262144
+      max_response_bytes: 2097152
+      allow_scripts: false
+

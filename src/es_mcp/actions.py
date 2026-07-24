@@ -189,6 +189,8 @@ def _is_expensive(body: Any, params: dict[str, Any]) -> bool:
         return True
     if params.get("search_type") == "dfs_query_then_fetch":
         return True
+    if params.get("track_total_hits") in {True, "true", "True", "1", 1}:
+        return True
     if isinstance(body, dict):
         if body.get("track_total_hits") is True:
             return True
@@ -297,4 +299,3 @@ def classify_request(
         ActionTier.ADMIN,
         supported=False,
     )
-

@@ -83,3 +83,26 @@ project:
     with pytest.raises(ProfileError, match="hard-denied"):
         load_profiles(path)
 
+
+def test_document_writes_cannot_bypass_approval(tmp_path):
+    path = tmp_path / "profiles.yaml"
+    path.write_text(
+        """
+project:
+  url: https://es.example.test
+  auth:
+    api_key_env: TEST_ES_API_KEY
+  permissions:
+    reads:
+      indices: ["project-*"]
+    writes:
+      allowed:
+        project-events: [UPDATE]
+    actions:
+      document_write: allow
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProfileError, match="must require approval"):
+        load_profiles(path)

@@ -9,6 +9,5 @@ build/
 *.egg-info/
 .DS_Store
 .env
-profiles.yaml
+/profiles.yaml
 secrets.env
-

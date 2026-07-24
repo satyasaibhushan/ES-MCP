@@ -109,6 +109,7 @@ class Profile:
 
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_INDEX_PATTERN_RE = re.compile(r"^[a-z0-9._+-]+\*?$")
 _ACTION_NAMES = {
     "discovery": ActionTier.DISCOVERY,
     "read": ActionTier.READ,
@@ -184,6 +185,10 @@ def _validate_pattern(pattern: Any, label: str) -> str:
         raise ProfileError(f"{label} only supports exact names or a trailing '*'")
     if "*" in pattern and (pattern.count("*") != 1 or not pattern.endswith("*")):
         raise ProfileError(f"{label} only supports exact names or a trailing '*'")
+    if not _INDEX_PATTERN_RE.fullmatch(pattern):
+        raise ProfileError(
+            f"{label} entries contain unsupported index-name characters"
+        )
     return pattern
 
 
@@ -226,6 +231,8 @@ def _parse_modes(raw: dict[str, Any]) -> dict[ActionTier, ActionMode]:
         raise ProfileError("admin actions are hard-denied in this version")
     if modes[ActionTier.STRUCTURAL_WRITE] != ActionMode.DENY:
         raise ProfileError("structural_write actions are hard-denied in this version")
+    if modes[ActionTier.DOCUMENT_WRITE] == ActionMode.ALLOW:
+        raise ProfileError("document_write must require approval or be denied")
     return modes
 
 

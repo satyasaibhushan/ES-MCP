@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -10,7 +11,7 @@ from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import TextContent, Tool, ToolAnnotations
 
 from .approval import ApprovalError, ApprovalStore
 from .audit import AuditLogger, default_audit_dir
@@ -90,6 +91,12 @@ class ESMCPServer:
                         "properties": {},
                         "additionalProperties": False,
                     },
+                    annotations=ToolAnnotations(
+                        readOnlyHint=True,
+                        destructiveHint=False,
+                        idempotentHint=True,
+                        openWorldHint=False,
+                    ),
                 ),
                 Tool(
                     name="es_describe_profile",
@@ -103,6 +110,12 @@ class ESMCPServer:
                         "required": ["profile"],
                         "additionalProperties": False,
                     },
+                    annotations=ToolAnnotations(
+                        readOnlyHint=True,
+                        destructiveHint=False,
+                        idempotentHint=True,
+                        openWorldHint=False,
+                    ),
                 ),
                 Tool(
                     name="es_request",
@@ -112,6 +125,12 @@ class ESMCPServer:
                         "unknown, denied, or approval-required requests are rejected."
                     ),
                     inputSchema=request_schema,
+                    annotations=ToolAnnotations(
+                        readOnlyHint=True,
+                        destructiveHint=False,
+                        idempotentHint=True,
+                        openWorldHint=True,
+                    ),
                 ),
                 Tool(
                     name="es_plan_request",
@@ -120,6 +139,12 @@ class ESMCPServer:
                         "Returns a short-lived, single-use token bound to the exact request."
                     ),
                     inputSchema=request_schema,
+                    annotations=ToolAnnotations(
+                        readOnlyHint=True,
+                        destructiveHint=False,
+                        idempotentHint=False,
+                        openWorldHint=False,
+                    ),
                 ),
                 Tool(
                     name="es_execute_approved_request",
@@ -128,6 +153,12 @@ class ESMCPServer:
                         "user approval. The token is consumed before execution."
                     ),
                     inputSchema=approved_schema,
+                    annotations=ToolAnnotations(
+                        readOnlyHint=False,
+                        destructiveHint=True,
+                        idempotentHint=False,
+                        openWorldHint=True,
+                    ),
                 ),
             ]
 
@@ -207,8 +238,26 @@ def _load_env_file(path: Path) -> None:
             os.environ[key] = value.strip().strip("'\"")
 
 
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run the policy-enforced Elasticsearch MCP server."
+    )
+    parser.add_argument(
+        "--profiles",
+        type=Path,
+        help="Path to profiles YAML (default: ES_MCP_PROFILES or ~/.es-access/profiles.yaml)",
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Validate configuration, print sanitized capabilities, and exit.",
+    )
+    return parser
+
+
 def main() -> None:
-    profiles_path = default_profiles_path()
+    arguments = _argument_parser().parse_args()
+    profiles_path = (arguments.profiles or default_profiles_path()).expanduser()
     secrets_path = Path(
         os.environ.get(
             "ES_MCP_SECRETS",
@@ -217,6 +266,12 @@ def main() -> None:
     ).expanduser()
     _load_env_file(secrets_path)
     profiles = load_profiles(profiles_path)
+    if arguments.check_config:
+        summaries = [
+            profile.capability_summary() for profile in profiles.values()
+        ]
+        print(json.dumps(summaries, indent=2, ensure_ascii=False))
+        return
     service = ESMCPService(
         profiles=profiles,
         approvals=ApprovalStore(ttl_seconds=300),

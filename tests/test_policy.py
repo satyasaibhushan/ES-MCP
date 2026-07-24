@@ -70,6 +70,14 @@ def test_enforces_search_limits_and_injects_defaults():
     assert isinstance(too_large, Deny)
     assert "max_hits" in too_large.reason
 
+    aggregation = check_request(
+        _profile(),
+        request,
+        {"aggs": {"services": {"terms": {"field": "service"}}}},
+    )
+    assert isinstance(aggregation, Allow)
+    assert aggregation.body["size"] == 0
+
 
 def test_denies_scripts_and_large_aggregations():
     script_request = classify_request(
@@ -145,3 +153,13 @@ def test_write_requires_approval_and_operation_allow_list():
     assert update_decision.mode == ActionMode.APPROVE
     assert isinstance(delete_decision, Deny)
     assert "not write-allowed" in delete_decision.reason
+
+
+def test_document_operations_require_exact_target_and_no_expansion_param():
+    wildcard_get = classify_request("GET", "/project-logs-*/_doc/1")
+    exact_get = classify_request("GET", "/project-events/_doc/1")
+
+    assert isinstance(check_request(_profile(), wildcard_get), Deny)
+    exact_decision = check_request(_profile(), exact_get)
+    assert isinstance(exact_decision, Allow)
+    assert "expand_wildcards" not in exact_decision.params
