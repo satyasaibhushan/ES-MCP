@@ -196,6 +196,50 @@ the unchanged request and returned token to `es_execute_approved_request`.
 Tokens expire after five minutes and are consumed before execution, including
 when execution fails.
 
+## Shared HTTP mode
+
+One long-running process can serve every client, so SSH tunnels stay warm
+across sessions and a plan made in one client can be executed from another:
+
+```sh
+uv run es-mcp --http                # http://127.0.0.1:7719/mcp
+uv run es-mcp --http --port 7720    # or ES_MCP_HTTP_HOST / ES_MCP_HTTP_PORT
+```
+
+- Streamable HTTP at `/mcp`, stateless, serving both 2026-07-28 and older
+  protocol clients. `GET /health` returns `{"ok": true}` without auth.
+- Binds loopback by default and rejects unexpected `Host` and `Origin` headers.
+- `/mcp` requires `Authorization: Bearer <token>`. The token is read from
+  `~/.es-access/http-token` (override with `ES_MCP_HTTP_TOKEN_FILE`) and
+  generated with mode `0600` on first start.
+
+Client configuration:
+
+```json
+{
+  "mcpServers": {
+    "elasticsearch": {
+      "type": "http",
+      "url": "http://127.0.0.1:7719/mcp",
+      "headers": { "Authorization": "Bearer <contents of ~/.es-access/http-token>" }
+    }
+  }
+}
+```
+
+To keep it running at login with launchd (logs in `~/Library/Logs/es-mcp/`):
+
+```sh
+uv sync
+scripts/install-launchd.sh              # installs com.es-mcp.http, checks /health
+scripts/install-launchd.sh --uninstall
+```
+
+The installer restores the previous agent if the new one does not become
+healthy. The agent runs `.venv/bin/es-mcp` from this checkout, so after code
+or dependency changes restart it with
+`launchctl kickstart -k gui/$(id -u)/com.es-mcp.http`.
+
 ## Authentication
 
 Configure exactly one authentication mode:

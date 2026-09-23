@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.es-mcp.http</string>
+
+  <!-- Filled in by scripts/install-launchd.sh. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ES_MCP__</string>
+    <string>--http</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ES_MCP_HTTP_PORT</key>
+    <string>__PORT__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- Always-on: start at login, restart if it dies. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/http.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/http.err.log</string>
+</dict>
+</plist>

@@ -1,4 +1,4 @@
-"""MCP stdio server entry point."""
+"""MCP server entry point (stdio by default, Streamable HTTP with --http)."""
 
 from __future__ import annotations
 
@@ -9,10 +9,20 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mcp.server import Server
+import jsonschema
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool, ToolAnnotations
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+    ToolAnnotations,
+)
 
+from . import __version__
 from .approval import ApprovalError, ApprovalStore
 from .audit import AuditLogger, default_audit_dir
 from .client import ElasticsearchError
@@ -50,197 +60,244 @@ _REQUEST_PROPERTIES: dict[str, Any] = {
 }
 
 
+def _tools() -> list[Tool]:
+    request_schema = {
+        "type": "object",
+        "properties": _REQUEST_PROPERTIES,
+        "required": ["profile", "method", "path"],
+        "additionalProperties": False,
+    }
+    approved_schema = {
+        "type": "object",
+        "properties": {
+            **_REQUEST_PROPERTIES,
+            "approval_token": {"type": "string"},
+        },
+        "required": [
+            "profile",
+            "method",
+            "path",
+            "approval_token",
+        ],
+        "additionalProperties": False,
+    }
+    return [
+        Tool(
+            name="es_list_profiles",
+            description=(
+                "List configured Elasticsearch profiles and sanitized "
+                "capabilities. Never exposes credentials."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
+            ),
+        ),
+        Tool(
+            name="es_check_connection",
+            description=(
+                "Open the configured SSH tunnel if needed and perform a "
+                "sanitized Elasticsearch reachability/version check."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"profile": {"type": "string"}},
+                "required": ["profile"],
+                "additionalProperties": False,
+            },
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        ),
+        Tool(
+            name="es_describe_profile",
+            description=(
+                "Describe one profile's index scopes, action modes, and limits. "
+                "Never exposes credentials."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"profile": {"type": "string"}},
+                "required": ["profile"],
+                "additionalProperties": False,
+            },
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=False,
+            ),
+        ),
+        Tool(
+            name="es_request",
+            description=(
+                "Execute an automatically allowed Elasticsearch request. "
+                "The server classifies method, path, parameters, and JSON body; "
+                "unknown, denied, or approval-required requests are rejected."
+            ),
+            input_schema=request_schema,
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        ),
+        Tool(
+            name="es_plan_request",
+            description=(
+                "Validate an approval-required request without executing it. "
+                "Returns a short-lived, single-use token bound to the exact request."
+            ),
+            input_schema=request_schema,
+            annotations=ToolAnnotations(
+                read_only_hint=True,
+                destructive_hint=False,
+                idempotent_hint=False,
+                open_world_hint=False,
+            ),
+        ),
+        Tool(
+            name="es_execute_approved_request",
+            description=(
+                "Execute the exact request previously planned, only after explicit "
+                "user approval. The token is consumed before execution."
+            ),
+            input_schema=approved_schema,
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=True,
+                idempotent_hint=False,
+                open_world_hint=True,
+            ),
+        ),
+    ]
+
+
+def _result(content: list[TextContent], *, is_error: bool = False) -> CallToolResult:
+    return CallToolResult(content=content, is_error=is_error)
+
+
 class ESMCPServer:
     def __init__(self, service: ESMCPService):
         self.service = service
-        self.server: Server = Server("es-mcp")
-        self._register()
+        self._tools = {tool.name: tool for tool in _tools()}
+        self.server: Server = Server(
+            "es-mcp",
+            version=__version__,
+            on_list_tools=self._list_tools,
+            on_call_tool=self._call_tool,
+        )
 
-    def _register(self) -> None:
-        @self.server.list_tools()
-        async def list_tools() -> list[Tool]:
-            request_schema = {
-                "type": "object",
-                "properties": _REQUEST_PROPERTIES,
-                "required": ["profile", "method", "path"],
-                "additionalProperties": False,
-            }
-            approved_schema = {
-                "type": "object",
-                "properties": {
-                    **_REQUEST_PROPERTIES,
-                    "approval_token": {"type": "string"},
-                },
-                "required": [
-                    "profile",
-                    "method",
-                    "path",
-                    "approval_token",
-                ],
-                "additionalProperties": False,
-            }
-            return [
-                Tool(
-                    name="es_list_profiles",
-                    description=(
-                        "List configured Elasticsearch profiles and sanitized "
-                        "capabilities. Never exposes credentials."
-                    ),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": False,
-                    },
-                    annotations=ToolAnnotations(
-                        readOnlyHint=True,
-                        destructiveHint=False,
-                        idempotentHint=True,
-                        openWorldHint=False,
-                    ),
-                ),
-                Tool(
-                    name="es_check_connection",
-                    description=(
-                        "Open the configured SSH tunnel if needed and perform a "
-                        "sanitized Elasticsearch reachability/version check."
-                    ),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {"profile": {"type": "string"}},
-                        "required": ["profile"],
-                        "additionalProperties": False,
-                    },
-                    annotations=ToolAnnotations(
-                        readOnlyHint=True,
-                        destructiveHint=False,
-                        idempotentHint=True,
-                        openWorldHint=True,
-                    ),
-                ),
-                Tool(
-                    name="es_describe_profile",
-                    description=(
-                        "Describe one profile's index scopes, action modes, and limits. "
-                        "Never exposes credentials."
-                    ),
-                    inputSchema={
-                        "type": "object",
-                        "properties": {"profile": {"type": "string"}},
-                        "required": ["profile"],
-                        "additionalProperties": False,
-                    },
-                    annotations=ToolAnnotations(
-                        readOnlyHint=True,
-                        destructiveHint=False,
-                        idempotentHint=True,
-                        openWorldHint=False,
-                    ),
-                ),
-                Tool(
-                    name="es_request",
-                    description=(
-                        "Execute an automatically allowed Elasticsearch request. "
-                        "The server classifies method, path, parameters, and JSON body; "
-                        "unknown, denied, or approval-required requests are rejected."
-                    ),
-                    inputSchema=request_schema,
-                    annotations=ToolAnnotations(
-                        readOnlyHint=True,
-                        destructiveHint=False,
-                        idempotentHint=True,
-                        openWorldHint=True,
-                    ),
-                ),
-                Tool(
-                    name="es_plan_request",
-                    description=(
-                        "Validate an approval-required request without executing it. "
-                        "Returns a short-lived, single-use token bound to the exact request."
-                    ),
-                    inputSchema=request_schema,
-                    annotations=ToolAnnotations(
-                        readOnlyHint=True,
-                        destructiveHint=False,
-                        idempotentHint=False,
-                        openWorldHint=False,
-                    ),
-                ),
-                Tool(
-                    name="es_execute_approved_request",
-                    description=(
-                        "Execute the exact request previously planned, only after explicit "
-                        "user approval. The token is consumed before execution."
-                    ),
-                    inputSchema=approved_schema,
-                    annotations=ToolAnnotations(
-                        readOnlyHint=False,
-                        destructiveHint=True,
-                        idempotentHint=False,
-                        openWorldHint=True,
-                    ),
-                ),
-            ]
+    async def _list_tools(
+        self,
+        ctx: ServerRequestContext,
+        params: PaginatedRequestParams | None,
+    ) -> ListToolsResult:
+        return ListToolsResult(tools=list(self._tools.values()))
 
-        @self.server.call_tool()
-        async def call_tool(
-            name: str, arguments: dict[str, Any]
-        ) -> list[TextContent]:
-            try:
-                if name == "es_list_profiles":
-                    return _text(self.service.list_profiles())
-                if name == "es_describe_profile":
-                    return _text(
-                        self.service.describe_profile(arguments["profile"])
+    async def _call_tool(
+        self,
+        ctx: ServerRequestContext,
+        params: CallToolRequestParams,
+    ) -> CallToolResult:
+        # Validation failures and escaped exceptions are tool errors, not
+        # protocol errors, so the calling model sees the message.
+        name = params.name
+        arguments = params.arguments or {}
+        try:
+            tool = self._tools.get(name)
+            if tool is not None:
+                try:
+                    jsonschema.validate(instance=arguments, schema=tool.input_schema)
+                except jsonschema.ValidationError as exc:
+                    return _result(
+                        [
+                            TextContent(
+                                type="text",
+                                text=f"Input validation error: {exc.message}",
+                            )
+                        ],
+                        is_error=True,
                     )
-                if name == "es_check_connection":
-                    return _text(
-                        await asyncio.to_thread(
-                            self.service.check_connection,
-                            arguments["profile"],
-                        )
+            return _result(await self._dispatch(name, arguments))
+        except Exception as exc:
+            return _result([TextContent(type="text", text=str(exc))], is_error=True)
+
+    async def _dispatch(
+        self, name: str, arguments: dict[str, Any]
+    ) -> list[TextContent]:
+        # Service calls run in worker threads: they block on the network and on
+        # the tunnel lock, which is held for the whole SSH handshake.
+        try:
+            if name == "es_list_profiles":
+                return _text(await asyncio.to_thread(self.service.list_profiles))
+            if name == "es_describe_profile":
+                return _text(
+                    await asyncio.to_thread(
+                        self.service.describe_profile,
+                        arguments["profile"],
                     )
-                if name == "es_request":
-                    result = await asyncio.to_thread(
-                        self.service.execute_allowed,
-                        profile_name=arguments["profile"],
-                        method=arguments["method"],
-                        path=arguments["path"],
-                        body=arguments.get("body"),
-                        params=arguments.get("params"),
+                )
+            if name == "es_check_connection":
+                return _text(
+                    await asyncio.to_thread(
+                        self.service.check_connection,
+                        arguments["profile"],
                     )
-                    return _text(result)
-                if name == "es_plan_request":
-                    result = await asyncio.to_thread(
-                        self.service.plan,
-                        profile_name=arguments["profile"],
-                        method=arguments["method"],
-                        path=arguments["path"],
-                        body=arguments.get("body"),
-                        params=arguments.get("params"),
-                    )
-                    return _text(result)
-                if name == "es_execute_approved_request":
-                    result = await asyncio.to_thread(
-                        self.service.execute_approved,
-                        profile_name=arguments["profile"],
-                        method=arguments["method"],
-                        path=arguments["path"],
-                        body=arguments.get("body"),
-                        params=arguments.get("params"),
-                        approval_token=arguments["approval_token"],
-                    )
-                    return _text(result)
-                return _error(f"Unknown tool: {name}")
-            except (
-                ApprovalError,
-                ElasticsearchError,
-                PermissionError,
-                ProfileError,
-                ValueError,
-            ) as exc:
-                return _error(str(exc))
-            except Exception as exc:
-                return _error(f"Unexpected server error ({type(exc).__name__})")
+                )
+            if name == "es_request":
+                result = await asyncio.to_thread(
+                    self.service.execute_allowed,
+                    profile_name=arguments["profile"],
+                    method=arguments["method"],
+                    path=arguments["path"],
+                    body=arguments.get("body"),
+                    params=arguments.get("params"),
+                )
+                return _text(result)
+            if name == "es_plan_request":
+                result = await asyncio.to_thread(
+                    self.service.plan,
+                    profile_name=arguments["profile"],
+                    method=arguments["method"],
+                    path=arguments["path"],
+                    body=arguments.get("body"),
+                    params=arguments.get("params"),
+                )
+                return _text(result)
+            if name == "es_execute_approved_request":
+                result = await asyncio.to_thread(
+                    self.service.execute_approved,
+                    profile_name=arguments["profile"],
+                    method=arguments["method"],
+                    path=arguments["path"],
+                    body=arguments.get("body"),
+                    params=arguments.get("params"),
+                    approval_token=arguments["approval_token"],
+                )
+                return _text(result)
+            return _error(f"Unknown tool: {name}")
+        except (
+            ApprovalError,
+            ElasticsearchError,
+            PermissionError,
+            ProfileError,
+            ValueError,
+        ) as exc:
+            return _error(str(exc))
+        except Exception as exc:
+            return _error(f"Unexpected server error ({type(exc).__name__})")
 
     async def run(self) -> None:
         try:
@@ -285,6 +342,20 @@ def _argument_parser() -> argparse.ArgumentParser:
         "--check-config",
         action="store_true",
         help="Validate configuration, print sanitized capabilities, and exit.",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Serve Streamable HTTP at /mcp instead of stdio.",
+    )
+    parser.add_argument(
+        "--host",
+        help="HTTP bind address (default: ES_MCP_HTTP_HOST or 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="HTTP port (default: ES_MCP_HTTP_PORT or 7719)",
     )
     return parser
 
@@ -332,6 +403,18 @@ def main() -> None:
         print(json.dumps(results, indent=2, ensure_ascii=False))
         if failed:
             raise SystemExit(1)
+        return
+    if arguments.http:
+        from . import http_server
+
+        host = arguments.host or os.environ.get(
+            "ES_MCP_HTTP_HOST", http_server.DEFAULT_HOST
+        )
+        port = arguments.port or int(
+            os.environ.get("ES_MCP_HTTP_PORT", http_server.DEFAULT_PORT)
+        )
+        token = http_server.load_or_create_token(http_server.default_token_path())
+        http_server.serve(ESMCPServer(service), host=host, port=port, token=token)
         return
     asyncio.run(ESMCPServer(service).run())
 
