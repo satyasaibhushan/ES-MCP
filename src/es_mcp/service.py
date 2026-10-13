@@ -18,7 +18,7 @@ from .actions import (
 from .approval import ApprovalError, ApprovalStore
 from .audit import AuditLogger
 from .client import ClientRegistry, ElasticsearchResponse
-from .policy import Allow, Deny, check_request
+from .policy import Allow, Deny, check_request, parse_body
 from .profiles import Profile, ProfileError
 
 
@@ -193,6 +193,7 @@ class ESMCPService:
         params: dict[str, Any] | None,
     ) -> PreparedRequest:
         profile = self.get_profile(profile_name)
+        body = parse_body(body)
         classified = classify_request(method, path, body, params)
         decision = check_request(profile, classified, body, params)
         if isinstance(decision, Deny):

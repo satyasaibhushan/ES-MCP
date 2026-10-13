@@ -155,3 +155,33 @@ def test_connection_check_returns_sanitized_version(tmp_path):
         "tunnel": {"enabled": False, "active": False},
     }
     assert executor.calls == []
+
+
+def test_string_body_is_parsed_before_classification(tmp_path):
+    service, executor = _service(tmp_path)
+
+    service.execute_allowed(
+        profile_name="project",
+        method="POST",
+        path="/project-logs/_search",
+        body='{"query": {"match_all": {}}}',
+    )
+    assert executor.calls[0]["body"]["query"] == {"match_all": {}}
+
+    # Encoded expensive bodies must still hit the expensive-read tier.
+    with pytest.raises(PermissionError, match="expensive_read"):
+        service.execute_allowed(
+            profile_name="project",
+            method="POST",
+            path="/project-logs/_search",
+            body='{"explain": true}',
+        )
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        service.execute_allowed(
+            profile_name="project",
+            method="POST",
+            path="/project-logs/_search",
+            body="{not json",
+        )
+    assert len(executor.calls) == 1

@@ -8,7 +8,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .actions import ActionMode, ActionTier, ClassifiedRequest
+from .actions import (
+    ActionMode,
+    ActionTier,
+    ClassifiedRequest,
+    RequestClassificationError,
+)
 from .profiles import Profile
 
 
@@ -225,6 +230,22 @@ def _check_params(profile: Profile, params: dict[str, Any]) -> str | None:
             if seconds is not None and seconds > profile.limits.timeout_seconds:
                 return f"{name} exceeds timeout_seconds {profile.limits.timeout_seconds}"
     return None
+
+
+def parse_body(body: Any) -> Any:
+    """Decode a body that some MCP clients send as a JSON string.
+
+    Must run before classification: the tier depends on body keys, so a
+    still-encoded body would hide expensive queries from the policy.
+    """
+    if not isinstance(body, str):
+        return body
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RequestClassificationError(
+            f"body string is not valid JSON: {exc.msg}"
+        ) from exc
 
 
 def _prepare_body(profile: Profile, classified: ClassifiedRequest, body: Any) -> PolicyDecision:
